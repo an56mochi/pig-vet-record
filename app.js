@@ -1367,6 +1367,255 @@ function exportData() {
 }
 
 // ===================================================
+// 集計ページ
+// ===================================================
+
+/** 日付文字列から年度（4月始まり）を返す */
+function getFiscalYear(dateStr) {
+  if (!dateStr) return null;
+  const d = new Date(dateStr);
+  if (isNaN(d)) return null;
+  const m = d.getMonth() + 1;
+  return m >= 4 ? d.getFullYear() : d.getFullYear() - 1;
+}
+
+/** 利用可能な年度一覧を返す */
+function getAvailableFiscalYears() {
+  const years = new Set();
+  state.records.forEach(r => {
+    const fy = getFiscalYear(r.date);
+    if (fy) years.add(fy);
+  });
+  return [...years].sort((a, b) => b - a);
+}
+
+/** 指定年度のレコードを返す（nullなら全件） */
+function filterByFiscalYear(records, fy) {
+  if (!fy) return records;
+  return records.filter(r => getFiscalYear(r.date) === fy);
+}
+
+function renderStatsPage(selectedFy) {
+  const container = document.getElementById('page-stats');
+  if (!container) return;
+
+  const years = getAvailableFiscalYears();
+  const fy = selectedFy || years[0] || null;
+  const filtered = filterByFiscalYear(state.records, fy);
+
+  if (state.records.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-state-icon">📊</div>
+        <div class="empty-state-title">データがありません</div>
+        <div class="empty-state-desc">カルテを登録すると集計が表示されます</div>
+      </div>`;
+    return;
+  }
+
+  // --- 集計処理 ---
+  const totalCases = filtered.length;
+  const totalHeads = filtered.reduce((sum, r) => {
+    return sum + (r.pigs ? r.pigs.length : (parseInt(r.headCount) || 1));
+  }, 0);
+  const farms = new Set(filtered.map(r => r.farmName).filter(Boolean));
+
+  // 診断名カウント
+  const diagCount = {};
+  filtered.forEach(r => {
+    const d = r.diagnosis ? r.diagnosis.trim() : '（未入力）';
+    diagCount[d] = (diagCount[d] || 0) + 1;
+  });
+  const diagRanking = Object.entries(diagCount)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10);
+  const diagMax = diagRanking[0]?.[1] || 1;
+
+  // 農場別カウント
+  const farmCount = {};
+  filtered.forEach(r => {
+    const f = r.farmName || '（未入力）';
+    farmCount[f] = (farmCount[f] || 0) + 1;
+  });
+  const farmRanking = Object.entries(farmCount).sort((a, b) => b[1] - a[1]);
+  const farmMax = farmRanking[0]?.[1] || 1;
+
+  // 月別カウント（4月〜3月の順）
+  const monthLabels = ['4月','5月','6月','7月','8月','9月','10月','11月','12月','1月','2月','3月'];
+  const monthNums =   [4,5,6,7,8,9,10,11,12,1,2,3];
+  const monthCount = {};
+  monthNums.forEach(m => { monthCount[m] = 0; });
+  filtered.forEach(r => {
+    if (!r.date) return;
+    const d = new Date(r.date);
+    if (!isNaN(d)) monthCount[d.getMonth() + 1] = (monthCount[d.getMonth() + 1] || 0) + 1;
+  });
+  const monthMax = Math.max(...Object.values(monthCount), 1);
+
+  // --- HTML生成 ---
+  const yearOptions = years.map(y =>
+    `<option value="${y}" ${y === fy ? 'selected' : ''}>${y}年度（${y}/4〜${y+1}/3）</option>`
+  ).join('');
+
+  const diagBars = diagRanking.map(([name, count], i) => `
+    <div class="stats-bar-row">
+      <div class="stats-bar-rank">${i + 1}</div>
+      <div class="stats-bar-label" title="${escHtml(name)}">${escHtml(name)}</div>
+      <div class="stats-bar-wrap">
+        <div class="stats-bar-fill" style="width:${Math.round(count/diagMax*100)}%"></div>
+      </div>
+      <div class="stats-bar-count">${count}件</div>
+    </div>`).join('');
+
+  const farmBars = farmRanking.map(([name, count]) => `
+    <div class="stats-bar-row">
+      <div class="stats-bar-rank">🏠</div>
+      <div class="stats-bar-label" title="${escHtml(name)}">${escHtml(name)}</div>
+      <div class="stats-bar-wrap">
+        <div class="stats-bar-fill" style="width:${Math.round(count/farmMax*100)}%;background:var(--accent)"></div>
+      </div>
+      <div class="stats-bar-count">${count}件</div>
+    </div>`).join('');
+
+  const monthBars = monthNums.map((m, i) => {
+    const count = monthCount[m] || 0;
+    return `
+    <div class="stats-month-col">
+      <div class="stats-month-bar-wrap">
+        <div class="stats-month-bar-fill" style="height:${Math.round(count/monthMax*100)}%"></div>
+      </div>
+      <div class="stats-month-count">${count || ''}</div>
+      <div class="stats-month-label">${monthLabels[i]}</div>
+    </div>`;
+  }).join('');
+
+  container.innerHTML = `
+    <div class="stats-page">
+
+      <!-- 年度セレクター -->
+      <div class="stats-year-selector">
+        <label class="form-label" style="margin:0;font-size:0.9rem">年度：</label>
+        <select class="form-control" style="width:auto" onchange="renderStatsPage(parseInt(this.value))">
+          ${yearOptions}
+          <option value="" ${!fy ? 'selected' : ''}>全期間</option>
+        </select>
+        <button class="btn btn-primary btn-sm" onclick="exportStatsCSV(${fy || 'null'})">
+          📊 集計CSVダウンロード
+        </button>
+      </div>
+
+      <!-- サマリーカード -->
+      <div class="stats-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:1.5rem">
+        <div class="stat-card">
+          <div class="stat-value">${totalCases}</div>
+          <div class="stat-label">解剖回数</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value">${totalHeads}</div>
+          <div class="stat-label">解剖頭数</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value">${farms.size}</div>
+          <div class="stat-label">対象農場数</div>
+        </div>
+      </div>
+
+      <!-- 診断名ランキング -->
+      <div class="section-heading">🔍 診断名ランキング（上位10）</div>
+      <div class="card" style="margin-bottom:1.5rem">
+        <div class="card-body">
+          ${diagRanking.length > 0 ? diagBars : '<div style="color:var(--text-muted);font-size:0.9rem">診断名のデータがありません</div>'}
+        </div>
+      </div>
+
+      <!-- 農場別件数 -->
+      <div class="section-heading">🏠 農場別件数</div>
+      <div class="card" style="margin-bottom:1.5rem">
+        <div class="card-body">
+          ${farmRanking.length > 0 ? farmBars : '<div style="color:var(--text-muted);font-size:0.9rem">農場データがありません</div>'}
+        </div>
+      </div>
+
+      <!-- 月別推移 -->
+      <div class="section-heading">📅 月別解剖件数</div>
+      <div class="card" style="margin-bottom:1.5rem">
+        <div class="card-body">
+          <div class="stats-month-chart">${monthBars}</div>
+        </div>
+      </div>
+
+    </div>`;
+}
+
+/** 集計CSVをエクスポート */
+function exportStatsCSV(fy) {
+  const filtered = filterByFiscalYear(state.records, fy || null);
+  if (filtered.length === 0) {
+    showToast('対象データがありません', 'warning');
+    return;
+  }
+
+  // 診断名集計
+  const diagCount = {};
+  filtered.forEach(r => {
+    const d = r.diagnosis ? r.diagnosis.trim() : '（未入力）';
+    diagCount[d] = (diagCount[d] || 0) + 1;
+  });
+
+  // 月別集計
+  const monthCount = {};
+  filtered.forEach(r => {
+    if (!r.date) return;
+    const d = new Date(r.date);
+    if (!isNaN(d)) {
+      const key = `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,'0')}`;
+      monthCount[key] = (monthCount[key] || 0) + 1;
+    }
+  });
+
+  // 農場別集計
+  const farmCount = {};
+  filtered.forEach(r => {
+    const f = r.farmName || '（未入力）';
+    farmCount[f] = (farmCount[f] || 0) + 1;
+  });
+
+  const bom = '\uFEFF';
+  const fyLabel = fy ? `${fy}年度` : '全期間';
+  const totalHeads = filtered.reduce((sum, r) => sum + (r.pigs ? r.pigs.length : (parseInt(r.headCount) || 1)), 0);
+
+  let csv = `${bom}豚解剖記録 集計レポート\r\n`;
+  csv += `集計期間,${fyLabel}\r\n`;
+  csv += `解剖回数,${filtered.length}\r\n`;
+  csv += `解剖頭数,${totalHeads}\r\n`;
+  csv += `\r\n`;
+  csv += `【診断名別件数】\r\n診断名,件数\r\n`;
+  Object.entries(diagCount).sort((a,b) => b[1]-a[1]).forEach(([k,v]) => {
+    csv += `"${k}",${v}\r\n`;
+  });
+  csv += `\r\n【農場別件数】\r\n農場名,件数\r\n`;
+  Object.entries(farmCount).sort((a,b) => b[1]-a[1]).forEach(([k,v]) => {
+    csv += `"${k}",${v}\r\n`;
+  });
+  csv += `\r\n【月別件数】\r\n年月,件数\r\n`;
+  Object.entries(monthCount).sort().forEach(([k,v]) => {
+    csv += `${k},${v}\r\n`;
+  });
+
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const dateStr = new Date().toISOString().slice(0,10).replace(/-/g,'');
+  a.href = url;
+  a.download = `解剖集計_${fyLabel}_${dateStr}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  showToast(`集計CSVをダウンロードしました ✓`, 'success');
+}
+
+// ===================================================
 // CSV出力
 // ===================================================
 
@@ -1612,6 +1861,7 @@ function setupEventListeners() {
     tab.addEventListener('click', () => {
       const page = tab.dataset.page;
       if (page === 'list') { renderList(); navigateTo(page); }
+      else if (page === 'stats') { renderStatsPage(); navigateTo(page); }
       else if (page === 'data') { renderDataPage(); renderDriveSettings(); navigateTo(page); }
     });
   });

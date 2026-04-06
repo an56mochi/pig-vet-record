@@ -48,6 +48,9 @@
     <button class="nav-tab active" data-page="list">
       📋 カルテ一覧
     </button>
+    <button class="nav-tab" data-page="stats">
+      📊 集計
+    </button>
     <button class="nav-tab" data-page="data">
       💾 データ管理
     </button>
@@ -106,6 +109,18 @@
          ================== -->
     <div id="page-form" class="page">
       <!-- app.jsのrenderForm()で動的描画 -->
+    </div>
+
+
+    <!-- ==================
+         集計ページ
+         ================== -->
+    <div id="page-stats" class="page">
+      <!-- app.jsのrenderStatsPage()で動的描画 -->
+      <div class="empty-state">
+        <div class="empty-state-icon">📊</div>
+        <div class="empty-state-title">読み込み中...</div>
+      </div>
     </div>
 
 
