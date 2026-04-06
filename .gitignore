@@ -1,0 +1,5 @@
+# 不要ファイルを除外
+*.gs
+*.md
+.DS_Store
+Thumbs.db

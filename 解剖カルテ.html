@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+  <meta name="description" content="豚専門獣医師向け解剖記録カルテWebアプリ">
+  <meta name="theme-color" content="#0f172a">
+
+  <!-- PWA対応（ホーム画面に追加時のアイコン設定） -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="豚解剖カルテ">
+
+  <title>豚解剖記録カルテ</title>
+
+  <!-- Google Fonts（日本語対応） -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ===================================================
+     アプリヘッダー
+     =================================================== -->
+<div class="app-container">
+
+  <header class="app-header">
+    <h1>
+      <span class="logo-icon">🐷</span>
+      豚解剖記録カルテ
+    </h1>
+    <div class="header-actions">
+      <!-- 同期ステータスアイコン -->
+      <div id="syncStatus" class="sync-status-wrap" title="Googleドライブ同期状態">
+        <span class="sync-icon unset">📵</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ===================================================
+       ナビゲーションタブ
+       =================================================== -->
+  <nav class="nav-tabs">
+    <button class="nav-tab active" data-page="list">
+      📋 カルテ一覧
+    </button>
+    <button class="nav-tab" data-page="data">
+      💾 データ管理
+    </button>
+  </nav>
+
+  <!-- ===================================================
+       メインコンテンツ
+       =================================================== -->
+  <main class="main-content">
+
+    <!-- ==================
+         カルテ一覧ページ
+         ================== -->
+    <div id="page-list" class="page active">
+
+      <!-- 検索・フィルターバー -->
+      <div class="search-bar">
+        <div class="search-row">
+          <div class="search-input">
+            <span class="search-icon">🔍</span>
+            <input
+              type="search"
+              id="searchInput"
+              placeholder="診断名・所見・農場名で検索..."
+              autocomplete="off"
+            >
+          </div>
+          <select id="farmFilter" class="form-control" style="width:auto;min-width:100px;flex-shrink:0">
+            <option value="">全農場</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- カルテ一覧 -->
+      <div class="record-list" id="recordList">
+        <!-- app.jsで動的描画 -->
+        <div class="empty-state">
+          <div class="empty-state-icon">📋</div>
+          <div class="empty-state-title">読み込み中...</div>
+        </div>
+      </div>
+
+    </div><!-- /page-list -->
+
+
+    <!-- ==================
+         カルテ詳細ページ
+         ================== -->
+    <div id="page-detail" class="page">
+      <!-- app.jsのrenderDetail()で動的描画 -->
+    </div>
+
+
+    <!-- ==================
+         新規作成・編集フォーム
+         ================== -->
+    <div id="page-form" class="page">
+      <!-- app.jsのrenderForm()で動的描画 -->
+    </div>
+
+
+    <!-- ==================
+         データ管理ページ
+         ================== -->
+    <div id="page-data" class="page">
+
+      <!-- 統計カード -->
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-value" id="stat-total">0</div>
+          <div class="stat-label">記録件数</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-farms">0</div>
+          <div class="stat-label">農場数</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-photos">0</div>
+          <div class="stat-label">写真枚数</div>
+        </div>
+      </div>
+
+      <!-- 出力 -->
+      <div class="section-heading">📊 データ出力</div>
+
+      <div class="data-management-grid">
+
+        <!-- CSV出力 -->
+        <div class="data-card">
+          <div class="data-card-icon">📊</div>
+          <div class="data-card-title">CSV出力</div>
+          <div class="data-card-desc">
+            全カルテをExcelで開けるCSV形式で<br>ダウンロードします
+          </div>
+          <button class="btn btn-primary btn-block" onclick="exportCSV()">
+            CSVダウンロード
+          </button>
+        </div>
+
+        <!-- PDF印刷 -->
+        <div class="data-card">
+          <div class="data-card-icon">🖨️</div>
+          <div class="data-card-title">全件印刷 / PDF</div>
+          <div class="data-card-desc">
+            全カルテを印刷用ページで開きます<br>「PDFに保存」でPDF化できます
+          </div>
+          <button class="btn btn-secondary btn-block" onclick="printRecord(null)">
+            印刷プレビュー
+          </button>
+        </div>
+
+      </div>
+
+      <div class="section-divider"></div>
+
+      <!-- エクスポート・インポート -->
+      <div class="section-heading">📂 バックアップ・復元</div>
+
+      <div class="data-management-grid">
+
+        <!-- エクスポート -->
+        <div class="data-card">
+          <div class="data-card-icon">📤</div>
+          <div class="data-card-title">バックアップ</div>
+          <div class="data-card-desc">
+            全データをJSONファイルとして<br>保存します（復元用）
+          </div>
+          <button class="btn btn-ghost btn-block" onclick="exportData()">
+            JSONダウンロード
+          </button>
+        </div>
+
+        <!-- インポート -->
+        <div class="data-card">
+          <div class="data-card-icon">📥</div>
+          <div class="data-card-title">復元</div>
+          <div class="data-card-desc">
+            バックアップしたJSONファイルを<br>読み込んで復元します
+          </div>
+          <button class="btn btn-ghost btn-block" onclick="triggerImport()">
+            ファイルを選択
+          </button>
+          <input type="file" id="importFileInput" accept=".json,application/json" style="display:none">
+        </div>
+
+      </div>
+
+      <div class="section-divider"></div>
+
+      <!-- Googleドライブ連携 -->
+      <div class="section-heading">☁️ Googleドライブ連携</div>
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Apps Script 設定</div>
+          <div id="syncStatus2"></div>
+        </div>
+        <div class="card-body" id="driveSettingsArea">
+          <!-- app.jsのrenderDriveSettings()で動的描画 -->
+          <div style="color:var(--text-muted);font-size:0.875rem">読み込み中...</div>
+        </div>
+      </div>
+
+      <div class="section-divider"></div>
+
+      <!-- 使い方ガイド -->
+      <div class="section-heading">ℹ️ このアプリについて</div>
+      <div class="card">
+        <div class="card-body" style="font-size:0.875rem;color:var(--text-muted);line-height:1.8">
+          <p>📱 <strong>スマホ・PCどちらでも</strong>使用できます</p>
+          <p>💾 <strong>データはブラウザ内</strong>（IndexedDB）に保存されます</p>
+          <p>🌐 <strong>オフライン</strong>でも動作します</p>
+          <p>⚠️ ブラウザのデータ消去をすると記録が失われます。<strong>定期的なエクスポート</strong>を推奨します</p>
+          <p>📷 写真は自動的に圧縮して保存されます（最大5MB/枚）</p>
+          <p style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border-light)">
+            Ver 1.0 | © 2024 豚解剖記録カルテ
+          </p>
+        </div>
+      </div>
+
+      <div class="section-divider"></div>
+
+      <!-- 危険ゾーン -->
+      <div class="section-heading" style="color:var(--danger)">⚠️ 危険な操作</div>
+      <div class="card" style="border-color:#fca5a5">
+        <div class="card-body">
+          <p style="font-size:0.875rem;color:var(--text-muted);margin-bottom:12px">
+            全データを完全に削除します。この操作は取り消せません。
+          </p>
+          <button class="btn btn-danger" onclick="handleDeleteAll()">
+            🗑️ 全データを削除
+          </button>
+        </div>
+      </div>
+
+    </div><!-- /page-data -->
+
+  </main><!-- /main-content -->
+
+</div><!-- /app-container -->
+
+
+<!-- ===================================================
+     FAB（新規作成ボタン）
+     =================================================== -->
+<button class="fab" id="fab" title="新規記録を作成" aria-label="新規記録を作成">
+  ＋
+</button>
+
+
+<!-- ===================================================
+     写真拡大モーダル
+     =================================================== -->
+<div class="photo-modal" id="photoModal" role="dialog" aria-label="写真プレビュー">
+  <button class="photo-modal-close" id="photoModalClose" aria-label="閉じる">✕</button>
+  <img id="photoModalImg" src="" alt="拡大写真">
+</div>
+
+
+<!-- ===================================================
+     確認モーダル（削除・インポートなどの確認用）
+     =================================================== -->
+<div class="modal-overlay" id="confirmModal" role="dialog">
+  <div class="modal-box">
+    <div class="modal-title" id="confirmModalTitle">確認</div>
+    <div class="modal-body" id="confirmModalBody"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="confirmModalCancel">キャンセル</button>
+      <button class="btn btn-danger" id="confirmModalOk">実行</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- ===================================================
+     トースト通知コンテナ
+     =================================================== -->
+<div class="toast-container" id="toastContainer" aria-live="polite"></div>
+
+
+<!-- ===================================================
+     JavaScript
+     =================================================== -->
+<script src="app.js"></script>
+
+</body>
+</html>
