@@ -118,14 +118,17 @@ async function syncToDrive(showToastOnSuccess = false) {
 
   try {
     const apiKey = getDriveApiKey();
-    const postUrl = `${url}${url.includes('?') ? '&' : '?'}key=${encodeURIComponent(apiKey)}`;
     const payload = {
       records: state.records,
       version: 2,
     };
-    const res = await fetch(postUrl, {
+    // フォーム形式で送信（CORS制限を回避）
+    const formData = new URLSearchParams();
+    formData.append('key', apiKey);
+    formData.append('data', JSON.stringify(payload));
+    const res = await fetch(url, {
       method: 'POST',
-      body: JSON.stringify(payload),
+      body: formData,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const json = await res.json();
