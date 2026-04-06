@@ -1463,12 +1463,15 @@ function _buildPrintHtml(records) {
     const pigsHtml = pigs.map((pig, i) => {
       const organRows = ORGAN_SECTIONS.map(s => {
         const text = pig.findings?.[s.id]?.text || '';
-        const photoCount = pig.findings?.[s.id]?.photos?.length || 0;
-        const photoNote = photoCount > 0
-          ? ` <span style="color:#666;font-size:0.85em">📷${photoCount}枚</span>` : '';
+        const photos = pig.findings?.[s.id]?.photos || [];
+        const photosHtml = photos.length > 0
+          ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">${
+              photos.map(p => `<img src="${p}" style="width:120px;height:90px;object-fit:cover;border-radius:3px;border:1px solid #ccc">`).join('')
+            }</div>` : '';
+        const isEmpty = !text && photos.length === 0;
         return `<tr>
           <td style="width:28%;font-weight:600;padding:5px 8px;border:1px solid #ccc;background:#f5f7ff;vertical-align:top">${s.icon} ${s.label}</td>
-          <td style="padding:5px 8px;border:1px solid #ccc;vertical-align:top">${text ? escHtml(text) : '<span style="color:#aaa">（所見なし）</span>'}${photoNote}</td>
+          <td style="padding:5px 8px;border:1px solid #ccc;vertical-align:top">${isEmpty ? '<span style="color:#aaa">（所見なし）</span>' : (text ? escHtml(text) : '')}${photosHtml}</td>
         </tr>`;
       }).join('');
 
