@@ -31,7 +31,7 @@ function getDriveUrl() {
 
 /** localStorageからAPIキーを取得（未設定時はデフォルト値） */
 function getDriveApiKey() {
-  return localStorage.getItem(DRIVE_API_KEY_KEY) || 'vet-record-2026';
+  return localStorage.getItem(DRIVE_API_KEY_KEY) || '';
 }
 
 /** 同期ステータスを更新（ヘッダーアイコン） */
