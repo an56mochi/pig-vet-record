@@ -179,7 +179,11 @@ async function testGistConnection() {
     });
     if (gistRes.ok) {
       const gists = await gistRes.json();
-      const existing = gists.find(g => g.files && g.files[GIST_FILENAME]);
+      // データが入っているGistを優先（サイズが大きい方）
+      const matches = gists.filter(g => g.files && g.files[GIST_FILENAME]);
+      const existing = matches.sort((a, b) =>
+        (b.files[GIST_FILENAME].size || 0) - (a.files[GIST_FILENAME].size || 0)
+      )[0];
       if (existing) {
         localStorage.setItem(GIST_ID_KEY, existing.id);
         showToast(`${user.login} として接続しました ✓（既存Gistを検出）`, 'success');
