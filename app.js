@@ -97,6 +97,12 @@ async function syncToGist(showToastOnSuccess = false) {
 
   updateSyncStatus('syncing');
 
+  // IndexedDBから最新データを直接取得（state.recordsが空でも確実に拾う）
+  const latestRecords = await getAllRecords();
+  if (latestRecords.length > 0) {
+    state.records = latestRecords;
+  }
+
   const dataSize = JSON.stringify(state.records).length / (1024 * 1024);
   if (dataSize > MAX_TOTAL_SIZE_MB) {
     showToast(`データが${MAX_TOTAL_SIZE_MB}MBを超えています。写真を減らすことを検討してください。`, 'warning', 5000);
