@@ -164,16 +164,37 @@ async function testGistConnection() {
   if (btn) { btn.disabled = true; btn.textContent = '確認中...'; }
 
   try {
+    // トークン検証
     const res = await fetch('https://api.github.com/user', {
       headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' }
     });
     if (!res.ok) throw new Error(`HTTP ${res.status} - トークンが正しくありません`);
     const user = await res.json();
     localStorage.setItem(GIST_TOKEN_KEY, token);
+
+    // 既存のGistを検索（全デバイスで同じGistを共有するため）
+    if (btn) btn.textContent = 'Gist検索中...';
+    const gistRes = await fetch('https://api.github.com/gists?per_page=100', {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' }
+    });
+    if (gistRes.ok) {
+      const gists = await gistRes.json();
+      const existing = gists.find(g => g.files && g.files[GIST_FILENAME]);
+      if (existing) {
+        localStorage.setItem(GIST_ID_KEY, existing.id);
+        showToast(`${user.login} として接続しました ✓（既存Gistを検出）`, 'success');
+        updateSyncStatus('synced');
+        renderDriveSettings();
+        await syncFromGist(); // 既存データを取得
+        return;
+      }
+    }
+
+    // 既存Gistなし→新規作成
     showToast(`${user.login} として接続しました ✓`, 'success');
     updateSyncStatus('synced');
     renderDriveSettings();
-    await syncToGist(false); // 初回Gist作成 or 既存に同期
+    await syncToGist(false);
   } catch (e) {
     showToast(`接続に失敗しました: ${e.message}`, 'error', 5000);
   } finally {
