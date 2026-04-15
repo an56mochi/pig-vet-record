@@ -16,31 +16,24 @@ const DB_VERSION = 1;
 const STORE_RECORDS = 'records';
 
 // ===================================================
-// Googleドライブ同期設定
+// GitHub Gist同期設定
 // ===================================================
 
-const DRIVE_URL_KEY = 'driveScriptUrl';
-const DRIVE_API_KEY_KEY = 'driveApiKey';
-const DRIVE_LAST_SYNC_KEY = 'driveLastSync';
-const MAX_TOTAL_SIZE_MB = 50; // JSONの上限警告サイズ（MB）
+const GIST_TOKEN_KEY   = 'gistToken';
+const GIST_ID_KEY      = 'gistId';
+const GIST_LAST_SYNC_KEY = 'gistLastSync';
+const GIST_FILENAME    = 'pig-vet-records.json';
+const MAX_TOTAL_SIZE_MB = 50;
 
-/** localStorageからApps Script URLを取得 */
-function getDriveUrl() {
-  return localStorage.getItem(DRIVE_URL_KEY) || '';
-}
-
-/** localStorageからAPIキーを取得（未設定時はデフォルト値） */
-function getDriveApiKey() {
-  return localStorage.getItem(DRIVE_API_KEY_KEY) || '';
-}
+function getGistToken() { return localStorage.getItem(GIST_TOKEN_KEY) || ''; }
+function getGistId()    { return localStorage.getItem(GIST_ID_KEY)    || ''; }
 
 /** 同期ステータスを更新（ヘッダーアイコン） */
 function updateSyncStatus(status) {
   const el = document.getElementById('syncStatus');
   if (!el) return;
-
   if (status === 'synced') {
-    const lastSync = localStorage.getItem(DRIVE_LAST_SYNC_KEY);
+    const lastSync = localStorage.getItem(GIST_LAST_SYNC_KEY);
     const timeStr = lastSync ? formatDateShort(lastSync) : '';
     el.innerHTML = `<span class="sync-icon synced" title="同期済み: ${timeStr}">☁️</span>`;
     el.title = `最終同期: ${timeStr}`;
@@ -49,141 +42,138 @@ function updateSyncStatus(status) {
   } else if (status === 'offline') {
     el.innerHTML = `<span class="sync-icon offline" title="オフライン">⚠️</span>`;
   } else {
-    // 未設定
-    el.innerHTML = `<span class="sync-icon unset" title="ドライブ未接続">📵</span>`;
+    el.innerHTML = `<span class="sync-icon unset" title="Gist未接続">📵</span>`;
   }
 }
 
 /**
- * ドライブからデータを取得してIndexedDBとマージ
- * 新しいupdatedAtを持つレコードを優先
+ * GistからデータをフェッチしてIndexedDBとマージ
  */
-async function syncFromDrive() {
-  const url = getDriveUrl();
-  if (!url) return;
+async function syncFromGist() {
+  const token = getGistToken();
+  const gistId = getGistId();
+  if (!token || !gistId) return;
 
   updateSyncStatus('syncing');
   try {
-    const apiKey = getDriveApiKey();
-    const fetchUrl = `${url}${url.includes('?') ? '&' : '?'}key=${encodeURIComponent(apiKey)}`;
-    const res = await fetch(fetchUrl, { method: 'GET' });
+    const res = await fetch(`https://api.github.com/gists/${gistId}`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' }
+    });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = await res.json();
-    if (!json.success || !json.data?.records) throw new Error('レスポンス形式が不正です');
+    const data = await res.json();
+    const raw = data.files?.[GIST_FILENAME]?.content;
+    if (!raw) { updateSyncStatus('synced'); return; }
 
-    const driveRecords = json.data.records;
+    const json = JSON.parse(raw);
+    const gistRecords = json.records || [];
     let merged = 0;
-
-    for (const driveRec of driveRecords) {
-      const local = state.records.find(r => r.id === driveRec.id);
-      // ローカルにない、またはドライブの方が新しい場合は上書き
-      if (!local || new Date(driveRec.updatedAt) > new Date(local.updatedAt)) {
-        await saveRecord(driveRec);
+    for (const rec of gistRecords) {
+      const local = state.records.find(r => r.id === rec.id);
+      if (!local || new Date(rec.updatedAt) > new Date(local.updatedAt)) {
+        await saveRecord(rec);
         merged++;
       }
     }
-
     if (merged > 0) {
       state.records = await getAllRecords();
       updateFarmFilter();
       renderList();
     }
-
-    localStorage.setItem(DRIVE_LAST_SYNC_KEY, new Date().toISOString());
+    localStorage.setItem(GIST_LAST_SYNC_KEY, new Date().toISOString());
     updateSyncStatus('synced');
-    if (merged > 0) showToast(`ドライブから${merged}件を取得しました ☁️`, 'success');
-
+    if (merged > 0) showToast(`Gistから${merged}件を取得しました ☁️`, 'success');
   } catch (e) {
-    console.warn('ドライブからの取得に失敗:', e);
+    console.warn('Gistからの取得に失敗:', e);
     updateSyncStatus('offline');
-    // 起動時エラーは静かに失敗（オフライン時を考慮）
   }
 }
 
 /**
- * ドライブにデータをアップロード
- * @param {boolean} showToastOnSuccess - 成功時にトーストを表示するか
+ * GistにデータをアップロードまたはGistを新規作成
  */
-async function syncToDrive(showToastOnSuccess = false) {
-  const url = getDriveUrl();
-  if (!url) return;
+async function syncToGist(showToastOnSuccess = false) {
+  const token = getGistToken();
+  if (!token) return;
 
   updateSyncStatus('syncing');
 
-  // サイズチェック
   const dataSize = JSON.stringify(state.records).length / (1024 * 1024);
   if (dataSize > MAX_TOTAL_SIZE_MB) {
     showToast(`データが${MAX_TOTAL_SIZE_MB}MBを超えています。写真を減らすことを検討してください。`, 'warning', 5000);
   }
 
   try {
-    const apiKey = getDriveApiKey();
-    const payload = {
-      records: state.records,
-      version: 2,
+    const payload = { records: state.records, version: 3 };
+    const body = {
+      description: '豚解剖記録カルテ バックアップ',
+      public: false,
+      files: { [GIST_FILENAME]: { content: JSON.stringify(payload, null, 2) } }
     };
-    // フォーム形式で送信（CORS制限を回避）
-    const formData = new URLSearchParams();
-    formData.append('key', apiKey);
-    formData.append('data', JSON.stringify(payload));
-    const res = await fetch(url, {
-      method: 'POST',
-      body: formData,
-    });
+
+    let gistId = getGistId();
+    let res;
+    if (gistId) {
+      res = await fetch(`https://api.github.com/gists/${gistId}`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+    } else {
+      // 初回：新規Gist作成
+      res = await fetch('https://api.github.com/gists', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        const created = await res.json();
+        localStorage.setItem(GIST_ID_KEY, created.id);
+        gistId = created.id;
+        renderDriveSettings(); // UI更新
+      }
+    }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = await res.json();
-    if (!json.success) throw new Error(json.error || '保存失敗');
-
-    localStorage.setItem(DRIVE_LAST_SYNC_KEY, new Date().toISOString());
+    localStorage.setItem(GIST_LAST_SYNC_KEY, new Date().toISOString());
     updateSyncStatus('synced');
-    if (showToastOnSuccess) showToast('ドライブに保存しました ☁️', 'success');
-
+    if (showToastOnSuccess) showToast('Gistに保存しました ☁️', 'success');
   } catch (e) {
-    console.warn('ドライブへのアップロードに失敗:', e);
+    console.warn('Gistへのアップロードに失敗:', e);
     updateSyncStatus('offline');
-    showToast('ドライブへの保存に失敗しました（オフライン？）', 'warning');
+    showToast('Gistへの保存に失敗しました（オフライン？）', 'warning');
   }
 }
 
 /**
- * 設定画面：Apps Script URLの接続テスト
+ * 設定画面：GitHubトークンの接続テスト
  */
-async function testDriveConnection() {
-  const input = document.getElementById('driveUrlInput');
+async function testGistConnection() {
+  const input = document.getElementById('gistTokenInput');
   if (!input) return;
-  const url = input.value.trim();
-  if (!url) {
-    showToast('URLを入力してください', 'warning');
-    return;
-  }
+  const token = input.value.trim();
+  if (!token) { showToast('トークンを入力してください', 'warning'); return; }
 
-  const apiKeyInput = document.getElementById('driveApiKeyInput');
-  const apiKey = apiKeyInput ? apiKeyInput.value.trim() : getDriveApiKey();
-  if (!apiKey) {
-    showToast('APIキーを入力してください', 'warning');
-    return;
-  }
-
-  const btn = document.getElementById('driveTestBtn');
-  if (btn) { btn.disabled = true; btn.textContent = '接続確認中...'; }
+  const btn = document.getElementById('gistTestBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '確認中...'; }
 
   try {
-    const testUrl = `${url}${url.includes('?') ? '&' : '?'}key=${encodeURIComponent(apiKey)}`;
-    const res = await fetch(testUrl, { method: 'GET' });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = await res.json();
-    if (json.error === 'Unauthorized') {
-      throw new Error('APIキーが正しくありません (401 Unauthorized)');
-    }
-    if (json.success !== undefined) {
-      showToast('接続成功です！URLとAPIキーを保存します ✓', 'success');
-      localStorage.setItem(DRIVE_URL_KEY, url);
-      localStorage.setItem(DRIVE_API_KEY_KEY, apiKey);
-      updateSyncStatus('synced');
-      renderDriveSettings();
-    } else {
-      throw new Error('不正なレスポンス形式');
-    }
+    const res = await fetch('https://api.github.com/user', {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' }
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status} - トークンが正しくありません`);
+    const user = await res.json();
+    localStorage.setItem(GIST_TOKEN_KEY, token);
+    showToast(`${user.login} として接続しました ✓`, 'success');
+    updateSyncStatus('synced');
+    renderDriveSettings();
+    await syncToGist(false); // 初回Gist作成 or 既存に同期
   } catch (e) {
     showToast(`接続に失敗しました: ${e.message}`, 'error', 5000);
   } finally {
@@ -191,61 +181,76 @@ async function testDriveConnection() {
   }
 }
 
-/** 設定画面のドライブ設定セクションを描画 */
+/** 設定画面のGist設定セクションを描画 */
 function renderDriveSettings() {
   const el = document.getElementById('driveSettingsArea');
   if (!el) return;
-  const url = getDriveUrl();
-  const apiKey = getDriveApiKey();
-  const lastSync = localStorage.getItem(DRIVE_LAST_SYNC_KEY);
+  const token = getGistToken();
+  const gistId = getGistId();
+  const lastSync = localStorage.getItem(GIST_LAST_SYNC_KEY);
 
-  el.innerHTML = `
-    <div class="drive-settings-inner">
-      <div class="form-group">
-        <label class="form-label">Apps Script Web App URL</label>
-        <input type="url" class="form-control" id="driveUrlInput"
-          value="${escHtml(url)}"
-          placeholder="https://script.google.com/macros/s/.../exec">
-      </div>
-      <div class="form-group" style="margin-top:10px">
-        <label class="form-label">APIキー</label>
-        <input type="text" class="form-control" id="driveApiKeyInput"
-          value="${escHtml(apiKey)}"
-          placeholder="管理者から受け取ったAPIキーを入力"
-          autocomplete="off">
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
-        <button class="btn btn-primary btn-sm" id="driveTestBtn" onclick="testDriveConnection()">
-          接続テスト
-        </button>
-        ${url ? `
-        <button class="btn btn-secondary btn-sm" onclick="syncToDrive(true)">
-          ☁️ 今すぐ同期
-        </button>
-        <button class="btn btn-ghost btn-sm" onclick="clearDriveUrl()">
-          接続を解除
-        </button>` : ''}
-      </div>
-      ${url ? `
-      <div style="font-size:0.8rem;color:var(--text-muted);margin-top:8px">
-        ${lastSync ? `最終同期：${formatDate(lastSync)}` : '未同期'}
-      </div>` : `
-      <div style="font-size:0.8rem;color:var(--text-muted);margin-top:8px;line-height:1.7">
-        ⓘ Apps ScriptのURLとAPIキーを入力して「接続テスト」を押してください。<br>
-        設定手順はアプリのREADMEまたはこん先生の報告書をご確認ください。
-      </div>`}
-    </div>`;
+  if (token) {
+    el.innerHTML = `
+      <div class="drive-settings-inner">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+          <span style="font-size:1.4rem">✅</span>
+          <div>
+            <div style="font-weight:600">GitHub Gist 接続済み</div>
+            <div style="font-size:0.8rem;color:var(--text-muted)">
+              ${gistId ? `Gist ID: ${gistId.substring(0, 8)}...` : '初回同期でGistを作成します'}
+            </div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-primary btn-sm" onclick="syncToGist(true)">
+            ☁️ 今すぐ同期
+          </button>
+          <button class="btn btn-ghost btn-sm" onclick="clearGistConnection()">
+            接続を解除
+          </button>
+        </div>
+        <div style="font-size:0.8rem;color:var(--text-muted);margin-top:8px">
+          ${lastSync ? `最終同期：${formatDate(lastSync)}` : '未同期'}<br>
+          保存先：GitHub プライベートGist / ${GIST_FILENAME}
+        </div>
+      </div>`;
+  } else {
+    el.innerHTML = `
+      <div class="drive-settings-inner">
+        <div class="form-group">
+          <label class="form-label">GitHub Personal Access Token</label>
+          <input type="password" class="form-control" id="gistTokenInput"
+            placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+            autocomplete="off">
+          <div style="font-size:0.75rem;color:var(--text-muted);margin-top:4px">
+            GitHub → Settings → Developer settings → Personal access tokens → gist スコープのみでOK
+          </div>
+        </div>
+        <div style="margin-top:10px">
+          <button class="btn btn-primary" id="gistTestBtn" onclick="testGistConnection()">
+            接続テスト
+          </button>
+        </div>
+        <div style="font-size:0.8rem;color:var(--text-muted);margin-top:12px;line-height:1.8">
+          ⓘ 初回設定手順：<br>
+          1. GitHub の <strong>Settings → Developer settings</strong> を開く<br>
+          2. <strong>Personal access tokens → Tokens (classic)</strong><br>
+          3. <strong>gist</strong> スコープにチェック → トークン生成<br>
+          4. 上に貼り付けて「接続テスト」をクリック
+        </div>
+      </div>`;
+  }
 }
 
-/** ドライブ接続を解除 */
-function clearDriveUrl() {
+/** Gist接続を解除 */
+function clearGistConnection() {
   showConfirm(
-    'ドライブ接続を解除しますか？',
-    'URLとAPIキーの設定を削除します。ローカルデータは残ります。',
+    'Gist接続を解除しますか？',
+    'トークンとGist IDの設定を削除します。ローカルデータは残ります。',
     () => {
-      localStorage.removeItem(DRIVE_URL_KEY);
-      localStorage.removeItem(DRIVE_API_KEY_KEY);
-      localStorage.removeItem(DRIVE_LAST_SYNC_KEY);
+      localStorage.removeItem(GIST_TOKEN_KEY);
+      localStorage.removeItem(GIST_ID_KEY);
+      localStorage.removeItem(GIST_LAST_SYNC_KEY);
       updateSyncStatus('unset');
       renderDriveSettings();
       showToast('接続を解除しました', 'success');
@@ -1291,8 +1296,8 @@ async function handleFormSave() {
     renderDetail(record);
     navigateTo('detail');
 
-    // Googleドライブに自動同期（バックグラウンド）
-    syncToDrive(false);
+    // Gistに自動同期（バックグラウンド）
+    syncToGist(false);
   } catch (e) {
     console.error('保存エラー:', e);
     showToast('保存に失敗しました', 'error');
@@ -1324,8 +1329,8 @@ function confirmDelete(id) {
         showToast('削除しました', 'success');
         navigateTo('list');
 
-        // Googleドライブに自動同期（バックグラウンド）
-        syncToDrive(false);
+        // Gistに自動同期（バックグラウンド）
+        syncToGist(false);
       } catch (e) {
         console.error('削除エラー:', e);
         showToast('削除に失敗しました', 'error');
@@ -1908,11 +1913,9 @@ async function init() {
     navigateTo('list');
 
     // ヘッダーの同期ステータス初期化
-    const url = getDriveUrl();
-    if (url) {
-      updateSyncStatus('offline'); // まずオフライン扱いで表示
-      // バックグラウンドでドライブから最新データを取得
-      syncFromDrive();
+    if (getGistToken()) {
+      updateSyncStatus('offline');
+      syncFromGist();
     } else {
       updateSyncStatus('unset');
     }
