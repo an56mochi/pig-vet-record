@@ -1732,19 +1732,37 @@ function printRecord(id) {
     return;
   }
 
-  const printHtml = _buildPrintHtml(recordsToPrint);
-  const printWindow = window.open('', '_blank', 'width=850,height=700');
-  if (!printWindow) {
-    showToast('ポップアップがブロックされました。ブラウザの設定を確認してください', 'error', 5000);
-    return;
+  // 別ウィンドウではなく、アプリ内オーバーレイで表示（閉じれば元の画面に即戻る）
+  const dateStr = new Date().toLocaleDateString('ja-JP');
+  const inner = _buildPrintInner(recordsToPrint);
+  let ov = document.getElementById('printOverlay');
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.id = 'printOverlay';
+    document.body.appendChild(ov);
   }
-  printWindow.document.write(printHtml);
-  printWindow.document.close();
+  ov.innerHTML = `
+    <div class="print-toolbar no-print">
+      <button class="print-close-btn" onclick="closePrintOverlay()">← 閉じる</button>
+      <span class="print-hint">🖨️ 印刷ダイアログで <strong>「PDFに保存」</strong> を選ぶとPDFになります</span>
+      <button class="print-do-btn" onclick="window.print()">🖨️ 印刷 / PDF保存</button>
+    </div>
+    <div class="print-paper">
+      <p style="color:#888;font-size:0.85em;margin-bottom:12px">出力日：${dateStr}　|　${recordsToPrint.length}件</p>
+      ${inner}
+    </div>`;
+  ov.style.display = 'block';
+  document.body.classList.add('printing-mode');
+  ov.scrollTop = 0;
 }
 
-function _buildPrintHtml(records) {
-  const dateStr = new Date().toLocaleDateString('ja-JP');
+function closePrintOverlay() {
+  const ov = document.getElementById('printOverlay');
+  if (ov) ov.style.display = 'none';
+  document.body.classList.remove('printing-mode');
+}
 
+function _buildPrintInner(records) {
   const recordsHtml = records.map(record => {
     const pigs = normalizePigs(record);
 
@@ -1808,28 +1826,7 @@ function _buildPrintHtml(records) {
       </div>`;
   }).join('');
 
-  return `<!DOCTYPE html>
-<html lang="ja">
-<head>
-  <meta charset="UTF-8">
-  <title>豚解剖記録カルテ - 印刷</title>
-  <style>
-    body { font-family: 'Meiryo', 'Yu Gothic', 'Noto Sans JP', sans-serif; font-size: 10.5pt; color: #333; margin: 12mm; }
-    @media print {
-      .no-print { display: none !important; }
-      body { margin: 8mm; }
-    }
-  </style>
-</head>
-<body>
-  <div class="no-print" style="padding:10px 14px;background:#dbeafe;margin-bottom:14px;border-radius:5px;display:flex;justify-content:space-between;align-items:center;font-size:0.9em">
-    <span>🖨️ ブラウザの印刷ダイアログで <strong>「PDFに保存」</strong> を選ぶとPDFになります</span>
-    <button onclick="window.print()" style="padding:7px 18px;background:#1e3a8a;color:white;border:none;border-radius:4px;cursor:pointer;font-weight:600">🖨️ 印刷 / PDF保存</button>
-  </div>
-  <p style="color:#888;font-size:0.85em;margin-bottom:12px">出力日：${dateStr}　|　${records.length}件</p>
-  ${recordsHtml}
-</body>
-</html>`;
+  return recordsHtml;
 }
 
 function triggerImport() {

@@ -1735,3 +1735,51 @@ textarea.form-control {
     gap: 6px;
   }
 }
+
+/* ===== 印刷オーバーレイ（別ウィンドウをやめてアプリ内に表示） ===== */
+#printOverlay {
+  position: fixed;
+  inset: 0;
+  background: #ffffff;
+  z-index: 9999;
+  overflow: auto;
+  display: none;
+  -webkit-overflow-scrolling: touch;
+}
+.print-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #dbeafe;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.9em;
+  border-bottom: 1px solid #93c5fd;
+  flex-wrap: wrap;
+}
+.print-toolbar .print-hint { color: #1e3a8a; flex: 1; min-width: 140px; }
+.print-close-btn {
+  padding: 8px 16px; background: #64748b; color: #fff; border: none;
+  border-radius: 6px; font-weight: 700; cursor: pointer; font-size: 0.95em;
+}
+.print-close-btn:hover { background: #475569; }
+.print-do-btn {
+  padding: 8px 18px; background: #1e3a8a; color: #fff; border: none;
+  border-radius: 6px; font-weight: 700; cursor: pointer; font-size: 0.95em;
+}
+.print-do-btn:hover { background: #1e40af; }
+.print-paper {
+  font-family: 'Meiryo', 'Yu Gothic', 'Noto Sans JP', sans-serif;
+  font-size: 10.5pt; color: #333; margin: 12mm; max-width: 800px;
+}
+
+@media print {
+  /* 印刷時はオーバーレイ以外を隠し、ツールバーも非表示 */
+  body.printing-mode > *:not(#printOverlay) { display: none !important; }
+  #printOverlay { position: static; overflow: visible; display: block !important; }
+  .no-print { display: none !important; }
+  .print-paper { margin: 8mm; max-width: none; }
+}
