@@ -1782,7 +1782,7 @@ function _buildPrintInner(records) {
       }).join('');
 
       const pigHeader = pigs.length > 1
-        ? `<div style="background:#1e3a8a;color:white;padding:4px 8px;font-weight:600;margin:10px 0 4px;border-radius:3px">
+        ? `<div class="pr-pig-head" style="background:#1e3a8a;color:white;padding:4px 8px;font-weight:600;margin:10px 0 4px;border-radius:3px">
             ${i + 1}頭目${pig.ageInfo ? `　日齢：${pig.ageInfo}` : ''}${pig.sex ? `　性別：${pig.sex}` : ''}${pig.memo ? `　メモ：${pig.memo}` : ''}
           </div>` : '';
 
@@ -1795,8 +1795,8 @@ function _buildPrintInner(records) {
       : '日付不明';
 
     return `
-      <div style="page-break-after:always;margin-bottom:20px;padding:16px;border:2px solid #1e3a8a;border-radius:6px">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:8px;border-bottom:2px solid #1e3a8a;margin-bottom:10px">
+      <div class="pr-record" style="page-break-after:always;margin-bottom:20px;padding:16px;border:2px solid #1e3a8a;border-radius:6px">
+        <div class="pr-head" style="display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:8px;border-bottom:2px solid #1e3a8a;margin-bottom:10px">
           <div>
             <div style="font-size:1.2em;font-weight:700;color:#1e3a8a">🐷 豚解剖記録カルテ</div>
             <div style="color:#555;margin-top:3px">🏠 ${escHtml(record.farmName) || '農場名未入力'}　|　解剖日時：${dateFormatted}</div>
@@ -1816,7 +1816,7 @@ function _buildPrintInner(records) {
           🔍 診断名：${escHtml(record.diagnosis)}
         </div>` : ''}
 
-        <div style="font-weight:600;margin:8px 0 4px;color:#1e3a8a">🔬 解剖所見</div>
+        <div class="pr-sub" style="font-weight:600;margin:8px 0 4px;color:#1e3a8a">🔬 解剖所見</div>
         ${pigsHtml}
 
         ${record.treatment ? `
