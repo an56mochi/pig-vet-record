@@ -23,7 +23,10 @@ const GIST_TOKEN_KEY   = 'gistToken';
 const GIST_ID_KEY      = 'gistId';
 const GIST_LAST_SYNC_KEY = 'gistLastSync';
 const GIST_FILENAME    = 'pig-vet-records.json';
-const MAX_TOTAL_SIZE_MB = 50;
+const MAX_TOTAL_SIZE_MB = 25;  // Gistへの保存が通っていた最大がおよそ25MB（2026-08時点）
+// 写真の保存サイズ（横幅の上限px・JPEG画質）。PDFの写真は小さく載るので、これで十分
+const PHOTO_MAX_WIDTH = 1000;
+const PHOTO_QUALITY   = 0.7;
 
 function getGistToken() { return localStorage.getItem(GIST_TOKEN_KEY) || ''; }
 function getGistId()    { return localStorage.getItem(GIST_ID_KEY)    || ''; }
@@ -61,7 +64,14 @@ async function syncFromGist() {
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    const raw = data.files?.[GIST_FILENAME]?.content;
+    const file = data.files?.[GIST_FILENAME];
+    let raw = file?.content;
+    // 1MBを超えるファイルはAPIが途中までしか返さない（truncated）ので、raw_urlから全文を取り直す
+    if (file?.truncated && file.raw_url) {
+      const rawRes = await fetch(file.raw_url);
+      if (!rawRes.ok) throw new Error(`raw HTTP ${rawRes.status}`);
+      raw = await rawRes.text();
+    }
     if (!raw) { updateSyncStatus('synced'); return; }
 
     const json = JSON.parse(raw);
@@ -105,7 +115,7 @@ async function syncToGist(showToastOnSuccess = false) {
 
   const dataSize = JSON.stringify(state.records).length / (1024 * 1024);
   if (dataSize > MAX_TOTAL_SIZE_MB) {
-    showToast(`データが${MAX_TOTAL_SIZE_MB}MBを超えています。写真を減らすことを検討してください。`, 'warning', 5000);
+    showToast(`データが${Math.round(dataSize)}MBあります（目安${MAX_TOTAL_SIZE_MB}MB）。「データ管理」の「写真を軽くする」を使ってください。`, 'warning', 6000);
   }
 
   try {
@@ -113,7 +123,7 @@ async function syncToGist(showToastOnSuccess = false) {
     const body = {
       description: '豚解剖記録カルテ バックアップ',
       public: false,
-      files: { [GIST_FILENAME]: { content: JSON.stringify(payload, null, 2) } }
+      files: { [GIST_FILENAME]: { content: JSON.stringify(payload) } }
     };
 
     let gistId = getGistId();
@@ -153,7 +163,8 @@ async function syncToGist(showToastOnSuccess = false) {
   } catch (e) {
     console.warn('Gistへのアップロードに失敗:', e);
     updateSyncStatus('offline');
-    showToast('Gistへの保存に失敗しました（オフライン？）', 'warning');
+    // データが重すぎて断られている場合もあるので、オフラインと決めつけずにサイズも出す
+    showToast(`Gistへの保存に失敗しました（${e.message}・データ${Math.round(dataSize)}MB）。重い場合は「写真を軽くする」を使ってください`, 'warning', 7000);
   }
 }
 
@@ -1184,7 +1195,7 @@ async function processPhotoFiles(pigIdx, organId, files) {
     }
     try {
       const base64 = await fileToBase64(file);
-      const resized = await resizeImage(base64, 1200, 0.85);
+      const resized = await resizeImage(base64, PHOTO_MAX_WIDTH, PHOTO_QUALITY);
       state.formPhotos[idx][organId].push(resized);
     } catch (e) {
       console.error('写真の読み込みに失敗:', e);
@@ -1210,6 +1221,7 @@ function resizeImage(base64, maxWidth, quality) {
       canvas.getContext('2d').drawImage(img, 0, 0, width, height);
       resolve(canvas.toDataURL('image/jpeg', quality));
     };
+    img.onerror = () => resolve(null);  // 読めない画像で止まらないように
     img.src = base64;
   });
 }
@@ -1403,6 +1415,62 @@ function exportData() {
   a.click();
   URL.revokeObjectURL(url);
   showToast('エクスポートしました ✓', 'success');
+}
+
+/**
+ * 保存済みの写真を小さく保存し直す（データが重くて同期・印刷が失敗するとき用）
+ * 始める前に、今のデータをJSONバックアップとして自動でダウンロードする
+ */
+function shrinkAllPhotos() {
+  const mb = n => (n / (1024 * 1024)).toFixed(1);
+  showConfirm(
+    '写真を軽くしますか？',
+    `保存済みの写真を横幅${PHOTO_MAX_WIDTH}pxの大きさに縮めて保存し直します。\n始める前に、今のデータをバックアップ（JSON）として自動でダウンロードします。\n写真が多いと数分かかります。PCで行うのがおすすめです。`,
+    async () => {
+      const before = JSON.stringify(state.records).length;
+      exportData();
+      showToast('写真を軽くしています…（画面を閉じないでください）', 'default', 6000);
+      let photos = 0, recs = 0;
+      // 150KB以下や、すでに横幅が上限以下の写真は触らない（何度押しても画質が落ち続けないように）。
+      // 縮めても小さくならなければ元のまま
+      const widthOf = src => new Promise(res => { const im = new Image(); im.onload = () => res(im.width); im.onerror = () => res(0); im.src = src; });
+      const shrinkList = async list => {
+        if (!Array.isArray(list)) return false;
+        let any = false;
+        for (let i = 0; i < list.length; i++) {
+          const p = list[i];
+          if (typeof p !== 'string' || p.length < 150 * 1024) continue;
+          if ((await widthOf(p)) <= PHOTO_MAX_WIDTH) continue;
+          const s = await resizeImage(p, PHOTO_MAX_WIDTH, PHOTO_QUALITY);
+          if (s && s.length < p.length) { list[i] = s; photos++; any = true; }
+        }
+        return any;
+      };
+      try {
+        for (const rec of state.records) {
+          let any = false;
+          const groups = [rec.findings, ...(rec.pigs || []).map(p => p.findings)];
+          for (const f of groups) {
+            for (const k in (f || {})) { if (await shrinkList(f[k]?.photos)) any = true; }
+          }
+          if (any) {
+            rec.updatedAt = new Date().toISOString();  // もう1台のPCにも軽い方が行き渡るように更新日時を進める
+            await saveRecord(rec);
+            recs++;
+          }
+        }
+      } catch (e) {
+        console.error('写真の縮小に失敗:', e);
+        showToast('途中で失敗しました。ダウンロードしたバックアップから戻せます', 'error', 7000);
+      }
+      state.records = await getAllRecords();
+      renderList();
+      renderDataPage();
+      const after = JSON.stringify(state.records).length;
+      showToast(`${recs}件・写真${photos}枚を軽くしました（${mb(before)}MB → ${mb(after)}MB）`, 'success', 8000);
+      if (getGistToken() && recs > 0) syncToGist(true);
+    }
+  );
 }
 
 // ===================================================
