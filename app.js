@@ -1830,12 +1830,29 @@ function printRecord(id) {
   ov.style.display = 'block';
   document.body.classList.add('printing-mode');
   ov.scrollTop = 0;
+  // 「PDFに保存」のファイル名はページのタイトルになるので、印刷画面を開いている間だけ差し替える
+  if (!_titleBeforePrint) _titleBeforePrint = document.title;
+  document.title = _printFileName(recordsToPrint);
+}
+
+let _titleBeforePrint = '';
+// 例：20261028_協同ファーム_解剖記録 ／ 全件なら 解剖記録_15件_20260506-20261028
+function _printFileName(records) {
+  const ymd = r => (r.date || '').slice(0, 10).replace(/-/g, '');
+  const safe = s => String(s || '').replace(/[\\/:*?"<>|\s]+/g, '').slice(0, 40);
+  if (records.length === 1) {
+    const r = records[0];
+    return [ymd(r) || '日付不明', safe(r.farmName) || '農場名未入力', '解剖記録'].join('_');
+  }
+  const ds = records.map(ymd).filter(Boolean).sort();
+  return `解剖記録_${records.length}件` + (ds.length ? `_${ds[0]}-${ds[ds.length - 1]}` : '');
 }
 
 function closePrintOverlay() {
   const ov = document.getElementById('printOverlay');
   if (ov) ov.style.display = 'none';
   document.body.classList.remove('printing-mode');
+  if (_titleBeforePrint) { document.title = _titleBeforePrint; _titleBeforePrint = ''; }
 }
 
 function _buildPrintInner(records) {
