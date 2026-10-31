@@ -1446,6 +1446,7 @@ textarea.form-control {
   color: var(--text-muted);
   margin-bottom: 1.5rem;
   line-height: 1.7;
+  white-space: pre-line;  /* 確認文の改行（\n）をそのまま表示する */
 }
 
 .modal-actions {

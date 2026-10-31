@@ -1423,12 +1423,9 @@ function exportData() {
  */
 function shrinkAllPhotos() {
   const mb = n => (n / (1024 * 1024)).toFixed(1);
-  showConfirm(
-    '写真を軽くしますか？',
-    `保存済みの写真を横幅${PHOTO_MAX_WIDTH}pxの大きさに縮めて保存し直します。\n始める前に、今のデータをバックアップ（JSON）として自動でダウンロードします。\n写真が多いと数分かかります。PCで行うのがおすすめです。`,
-    async () => {
+  // 縮小の本体。バックアップの保存を本人が確かめてから動かす（スマホはダウンロードが黙って失敗することがあるため）
+  const doShrink = async () => {
       const before = JSON.stringify(state.records).length;
-      exportData();
       showToast('写真を軽くしています…（画面を閉じないでください）', 'default', 6000);
       let photos = 0, recs = 0;
       // 150KB以下や、すでに横幅が上限以下の写真は触らない（何度押しても画質が落ち続けないように）。
@@ -1469,6 +1466,17 @@ function shrinkAllPhotos() {
       const after = JSON.stringify(state.records).length;
       showToast(`${recs}件・写真${photos}枚を軽くしました（${mb(before)}MB → ${mb(after)}MB）`, 'success', 8000);
       if (getGistToken() && recs > 0) syncToGist(true);
+  };
+  showConfirm(
+    '写真を軽くしますか？',
+    `保存済みの写真を横幅${PHOTO_MAX_WIDTH}pxの大きさに縮めて保存し直します。\n先に、今のデータをバックアップ（JSON）としてダウンロードします。\n写真が多いと数分かかります。`,
+    () => {
+      exportData();
+      setTimeout(() => showConfirm(
+        'バックアップは保存できましたか？',
+        'ダウンロードしたファイル（豚解剖記録_日付.json）が保存されたのを確かめてから「実行」を押してください。\niPhoneでは「ファイル」アプリの「ダウンロード」に入ります。\n保存できなかったときは「キャンセル」を押してください（写真は変わりません）。',
+        doShrink
+      ), 1200);
     }
   );
 }
