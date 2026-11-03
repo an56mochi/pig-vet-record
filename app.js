@@ -1,8 +1,8 @@
 /**
  * 豚解剖記録カルテ - app.js v3.0
  * IndexedDBを使ったオフライン対応Webアプリ
- * 外部サービス不使用・個体別管理・ドラッグ&ドロップ対応
- * + Google Drive連携（Apps Script経由）
+ * 個体別管理・ドラッグ&ドロップ対応
+ * + クラウド同期（GitHubの非公開リポジトリに1件ずつ保存）
  */
 
 'use strict';
@@ -16,220 +16,240 @@ const DB_VERSION = 1;
 const STORE_RECORDS = 'records';
 
 // ===================================================
-// GitHub Gist同期設定
+// クラウド同期（GitHubの非公開リポジトリ）
+// 記録1件＝ records/<id>.json。前回の同期から変わった記録だけ送受信する。
+// 削除した記録は {id, deleted:true, updatedAt} の印を残し、ほかの端末でも消えるようにする。
+// （以前は秘密Gistに全件を1ファイルで保存していたが、URLだけで読めてしまうのと、
+//   写真で25MBを超えると保存が黙って失敗していたため作り直した。2026-11）
 // ===================================================
 
-const GIST_TOKEN_KEY   = 'gistToken';
-const GIST_ID_KEY      = 'gistId';
-const GIST_LAST_SYNC_KEY = 'gistLastSync';
-const GIST_FILENAME    = 'pig-vet-records.json';
-const MAX_TOTAL_SIZE_MB = 25;  // Gistへの保存が通っていた最大がおよそ25MB（2026-08時点）
+const SYNC_TOKEN_KEY   = 'syncToken';
+const SYNC_REPO_KEY    = 'syncRepo';
+const SYNC_LAST_KEY    = 'syncLast';
+const SYNC_SHAS_KEY    = 'syncShas';     // {id: 前回見たリモートのsha}
+const SYNC_SENT_KEY    = 'syncSent';     // {id: クラウドと揃っている時点のupdatedAt}
+const SYNC_DELETED_KEY = 'syncDeleted';  // {id: 削除した日時} まだクラウドに伝えていない削除
+const DEFAULT_SYNC_REPO = 'an56mochi/pig-vet-data';
+const SYNC_DIR = 'records';
+// 旧Gist同期の設定（つなぎ直しの案内と後片付けにだけ使う）
+const OLD_GIST_KEYS = ['gistToken', 'gistId', 'gistLastSync'];
+
 // 写真の保存サイズ（横幅の上限px・JPEG画質）。PDFの写真は小さく載るので、これで十分
 const PHOTO_MAX_WIDTH = 1000;
 const PHOTO_QUALITY   = 0.7;
 
-function getGistToken() { return localStorage.getItem(GIST_TOKEN_KEY) || ''; }
-function getGistId()    { return localStorage.getItem(GIST_ID_KEY)    || ''; }
+function getSyncToken() { return localStorage.getItem(SYNC_TOKEN_KEY) || ''; }
+function getSyncRepo()  { return localStorage.getItem(SYNC_REPO_KEY) || DEFAULT_SYNC_REPO; }
+function loadSyncMap(key) { try { return JSON.parse(localStorage.getItem(key)) || {}; } catch (e) { return {}; } }
+function saveSyncMap(key, map) { localStorage.setItem(key, JSON.stringify(map)); }
+const recStamp = r => r.updatedAt || r.createdAt || '';
 
 /** 同期ステータスを更新（ヘッダーアイコン） */
 function updateSyncStatus(status) {
   const el = document.getElementById('syncStatus');
   if (!el) return;
   if (status === 'synced') {
-    const lastSync = localStorage.getItem(GIST_LAST_SYNC_KEY);
+    const lastSync = localStorage.getItem(SYNC_LAST_KEY);
     const timeStr = lastSync ? formatDateShort(lastSync) : '';
     el.innerHTML = `<span class="sync-icon synced" title="同期済み: ${timeStr}">☁️</span>`;
     el.title = `最終同期: ${timeStr}`;
   } else if (status === 'syncing') {
     el.innerHTML = `<span class="sync-icon syncing" title="同期中...">🔄</span>`;
   } else if (status === 'offline') {
-    el.innerHTML = `<span class="sync-icon offline" title="オフライン">⚠️</span>`;
+    el.innerHTML = `<span class="sync-icon offline" title="同期できていません">⚠️</span>`;
   } else {
-    el.innerHTML = `<span class="sync-icon unset" title="Gist未接続">📵</span>`;
+    el.innerHTML = `<span class="sync-icon unset" title="クラウド同期 未設定">📵</span>`;
   }
 }
 
-/**
- * GistからデータをフェッチしてIndexedDBとマージ
- */
-async function syncFromGist() {
-  const token = getGistToken();
-  const gistId = getGistId();
-  if (!token || !gistId) return;
+// ---------- GitHub API ----------
+function ghFetch(path, opts = {}) {
+  return fetch(`https://api.github.com/repos/${getSyncRepo()}/${path}`, {
+    ...opts,
+    headers: {
+      Authorization: `Bearer ${getSyncToken()}`,
+      Accept: 'application/vnd.github+json',
+      ...(opts.headers || {}),
+    },
+  });
+}
 
+/** 文字列（日本語・写真入り）をbase64にする。大きいデータでも固まらないようBlob経由 */
+function textToBase64(text) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result).split(',', 2)[1] || '');
+    fr.onerror = () => reject(fr.error);
+    fr.readAsDataURL(new Blob([text], { type: 'application/json' }));
+  });
+}
+
+/** クラウドにある記録ファイルの一覧（まだ1件も無ければ空） */
+async function listRemoteFiles() {
+  const res = await ghFetch(`contents/${SYNC_DIR}?t=${Date.now()}`, { cache: 'no-store' });
+  if (res.status === 404) return [];
+  if (!res.ok) throw new Error(`一覧 HTTP ${res.status}`);
+  const list = await res.json();
+  return (Array.isArray(list) ? list : []).filter(f => f.type === 'file' && f.name.endsWith('.json'));
+}
+
+/** 記録ファイルを1件読む（1MBを超えても全文を受け取れる raw 形式） */
+async function getRemoteRecord(path) {
+  const res = await ghFetch(`contents/${path}?t=${Date.now()}`, {
+    cache: 'no-store',
+    headers: { Accept: 'application/vnd.github.raw' },
+  });
+  if (!res.ok) throw new Error(`読込 HTTP ${res.status}`);
+  return JSON.parse(await res.text());
+}
+
+/** 記録ファイルを1件書く。shaが古い・不明なときは取り直して1回だけやり直す。新しいshaを返す */
+async function putRemoteRecord(id, obj, sha) {
+  const path = `${SYNC_DIR}/${encodeURIComponent(id)}.json`;
+  const content = await textToBase64(JSON.stringify(obj));
+  const put = s => ghFetch(`contents/${path}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: `${obj.deleted ? 'delete' : 'save'} ${id}`, content, ...(s ? { sha: s } : {}) }),
+  });
+  let res = await put(sha);
+  if (res.status === 409 || res.status === 422) {
+    const meta = await ghFetch(`contents/${path}?t=${Date.now()}`, { cache: 'no-store' });
+    const fresh = meta.ok ? (await meta.json()).sha : undefined;
+    res = await put(fresh);
+  }
+  if (!res.ok) throw new Error(`保存 HTTP ${res.status}`);
+  return (await res.json()).content.sha;
+}
+
+// ---------- 同期の本体 ----------
+let _syncRunning = false, _syncAgain = false;
+
+/** クラウド→端末：変わったファイルだけ読み、新しい方を残す */
+async function syncPull() {
+  const remote = await listRemoteFiles();
+  const shas = loadSyncMap(SYNC_SHAS_KEY), sent = loadSyncMap(SYNC_SENT_KEY);
+  const pending = loadSyncMap(SYNC_DELETED_KEY);
+  const local = new Map((await getAllRecords()).map(r => [r.id, r]));
+  let got = 0, removed = 0;
+  for (const f of remote) {
+    const id = decodeURIComponent(f.name.slice(0, -5));
+    if (shas[id] === f.sha) continue;
+    const rec = await getRemoteRecord(f.path);
+    const mine = local.get(id);
+    if (rec.deleted) {
+      if (mine && recStamp(rec) >= recStamp(mine)) { await deleteRecord(id); removed++; }
+    } else if (!pending[id] && (!mine || recStamp(rec) > recStamp(mine))) {
+      await saveRecord(rec); got++;
+    }
+    shas[id] = f.sha;
+    sent[id] = rec.deleted ? '' : recStamp(rec);
+    saveSyncMap(SYNC_SHAS_KEY, shas); saveSyncMap(SYNC_SENT_KEY, sent);
+  }
+  if (got || removed) {
+    state.records = await getAllRecords();
+    updateFarmFilter();
+    renderList();
+  }
+  return { got, removed };
+}
+
+/** 端末→クラウド：前回からの変更と削除だけ送る */
+async function syncPush() {
+  const shas = loadSyncMap(SYNC_SHAS_KEY), sent = loadSyncMap(SYNC_SENT_KEY);
+  const pending = loadSyncMap(SYNC_DELETED_KEY);
+  let sentN = 0;
+  for (const rec of await getAllRecords()) {
+    if (sent[rec.id] === recStamp(rec)) continue;
+    shas[rec.id] = await putRemoteRecord(rec.id, rec, shas[rec.id]);
+    sent[rec.id] = recStamp(rec);
+    saveSyncMap(SYNC_SHAS_KEY, shas); saveSyncMap(SYNC_SENT_KEY, sent);  // 途中で切れても送れた分は覚えておく
+    sentN++;
+  }
+  for (const [id, at] of Object.entries(pending)) {
+    shas[id] = await putRemoteRecord(id, { id, deleted: true, updatedAt: at }, shas[id]);
+    sent[id] = '';
+    delete pending[id];
+    saveSyncMap(SYNC_SHAS_KEY, shas); saveSyncMap(SYNC_SENT_KEY, sent); saveSyncMap(SYNC_DELETED_KEY, pending);
+    sentN++;
+  }
+  return sentN;
+}
+
+/** 受信→送信の順で同期する。動いている最中に呼ばれたら、終わってからもう一度だけ回す */
+async function syncNow(showToastOnSuccess = false) {
+  if (!getSyncToken()) return;
+  if (_syncRunning) { _syncAgain = true; return; }
+  _syncRunning = true;
   updateSyncStatus('syncing');
   try {
-    const res = await fetch(`https://api.github.com/gists/${gistId}`, {
-      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' }
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    const file = data.files?.[GIST_FILENAME];
-    let raw = file?.content;
-    // 1MBを超えるファイルはAPIが途中までしか返さない（truncated）ので、raw_urlから全文を取り直す
-    if (file?.truncated && file.raw_url) {
-      const rawRes = await fetch(file.raw_url);
-      if (!rawRes.ok) throw new Error(`raw HTTP ${rawRes.status}`);
-      raw = await rawRes.text();
-    }
-    if (!raw) { updateSyncStatus('synced'); return; }
-
-    const json = JSON.parse(raw);
-    const gistRecords = json.records || [];
-    let merged = 0;
-    for (const rec of gistRecords) {
-      const local = state.records.find(r => r.id === rec.id);
-      if (!local || new Date(rec.updatedAt) > new Date(local.updatedAt)) {
-        await saveRecord(rec);
-        merged++;
-      }
-    }
-    if (merged > 0) {
-      state.records = await getAllRecords();
-      updateFarmFilter();
-      renderList();
-    }
-    localStorage.setItem(GIST_LAST_SYNC_KEY, new Date().toISOString());
+    const { got, removed } = await syncPull();
+    const sentN = await syncPush();
+    localStorage.setItem(SYNC_LAST_KEY, new Date().toISOString());
     updateSyncStatus('synced');
-    if (merged > 0) showToast(`Gistから${merged}件を取得しました ☁️`, 'success');
+    if (got || removed) {
+      const parts = [got ? `${got}件を受け取りました` : '', removed ? `${removed}件の削除を反映しました` : ''].filter(Boolean);
+      showToast(`クラウドから${parts.join('・')} ☁️`, 'success');
+    }
+    if (showToastOnSuccess) showToast(sentN ? `クラウドに${sentN}件を保存しました ☁️` : 'クラウドと同じ内容です ☁️', 'success');
   } catch (e) {
-    console.warn('Gistからの取得に失敗:', e);
+    console.warn('同期に失敗:', e);
     updateSyncStatus('offline');
-  }
-}
-
-/**
- * GistにデータをアップロードまたはGistを新規作成
- */
-async function syncToGist(showToastOnSuccess = false) {
-  const token = getGistToken();
-  if (!token) return;
-
-  updateSyncStatus('syncing');
-
-  // IndexedDBから最新データを直接取得（state.recordsが空でも確実に拾う）
-  const latestRecords = await getAllRecords();
-  if (latestRecords.length > 0) {
-    state.records = latestRecords;
-  }
-
-  const dataSize = JSON.stringify(state.records).length / (1024 * 1024);
-  if (dataSize > MAX_TOTAL_SIZE_MB) {
-    showToast(`データが${Math.round(dataSize)}MBあります（目安${MAX_TOTAL_SIZE_MB}MB）。「データ管理」の「写真を軽くする」を使ってください。`, 'warning', 6000);
-  }
-
-  try {
-    const payload = { records: state.records, version: 3 };
-    const body = {
-      description: '豚解剖記録カルテ バックアップ',
-      public: false,
-      files: { [GIST_FILENAME]: { content: JSON.stringify(payload) } }
-    };
-
-    let gistId = getGistId();
-    let res;
-    if (gistId) {
-      res = await fetch(`https://api.github.com/gists/${gistId}`, {
-        method: 'PATCH',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: 'application/vnd.github+json',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
-      });
-    } else {
-      // 初回：新規Gist作成
-      res = await fetch('https://api.github.com/gists', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: 'application/vnd.github+json',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
-      });
-      if (res.ok) {
-        const created = await res.json();
-        localStorage.setItem(GIST_ID_KEY, created.id);
-        gistId = created.id;
-        renderDriveSettings(); // UI更新
-      }
-    }
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    localStorage.setItem(GIST_LAST_SYNC_KEY, new Date().toISOString());
-    updateSyncStatus('synced');
-    if (showToastOnSuccess) showToast('Gistに保存しました ☁️', 'success');
-  } catch (e) {
-    console.warn('Gistへのアップロードに失敗:', e);
-    updateSyncStatus('offline');
-    // データが重すぎて断られている場合もあるので、オフラインと決めつけずにサイズも出す
-    showToast(`Gistへの保存に失敗しました（${e.message}・データ${Math.round(dataSize)}MB）。重い場合は「写真を軽くする」を使ってください`, 'warning', 7000);
-  }
-}
-
-/**
- * 設定画面：GitHubトークンの接続テスト
- */
-async function testGistConnection() {
-  const input = document.getElementById('gistTokenInput');
-  if (!input) return;
-  const token = input.value.trim();
-  if (!token) { showToast('トークンを入力してください', 'warning'); return; }
-
-  const btn = document.getElementById('gistTestBtn');
-  if (btn) { btn.disabled = true; btn.textContent = '確認中...'; }
-
-  try {
-    // トークン検証
-    const res = await fetch('https://api.github.com/user', {
-      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' }
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status} - トークンが正しくありません`);
-    const user = await res.json();
-    localStorage.setItem(GIST_TOKEN_KEY, token);
-
-    // 既存のGistを検索（全デバイスで同じGistを共有するため）
-    if (btn) btn.textContent = 'Gist検索中...';
-    const gistRes = await fetch('https://api.github.com/gists?per_page=100', {
-      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' }
-    });
-    if (gistRes.ok) {
-      const gists = await gistRes.json();
-      // データが入っているGistを優先（サイズが大きい方）
-      const matches = gists.filter(g => g.files && g.files[GIST_FILENAME]);
-      const existing = matches.sort((a, b) =>
-        (b.files[GIST_FILENAME].size || 0) - (a.files[GIST_FILENAME].size || 0)
-      )[0];
-      if (existing) {
-        localStorage.setItem(GIST_ID_KEY, existing.id);
-        showToast(`${user.login} として接続しました ✓（既存Gistを検出）`, 'success');
-        updateSyncStatus('synced');
-        renderDriveSettings();
-        await syncFromGist(); // 既存データを取得
-        return;
-      }
-    }
-
-    // 既存Gistなし→新規作成
-    showToast(`${user.login} として接続しました ✓`, 'success');
-    updateSyncStatus('synced');
-    renderDriveSettings();
-    await syncToGist(false);
-  } catch (e) {
-    showToast(`接続に失敗しました: ${e.message}`, 'error', 5000);
+    showToast(`クラウド同期に失敗しました（${e.message}）。電波の良い所で「今すぐ同期」を押してください`, 'warning', 7000);
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '接続テスト'; }
+    _syncRunning = false;
+    if (renderDriveSettings) renderDriveSettings();
+    if (_syncAgain) { _syncAgain = false; syncNow(false); }
   }
 }
 
-/** 設定画面のGist設定セクションを描画 */
+/** 記録を削除したときに呼ぶ（次の同期でほかの端末からも消える） */
+function markDeletedForSync(id) {
+  if (!getSyncToken()) return;
+  const pending = loadSyncMap(SYNC_DELETED_KEY);
+  pending[id] = new Date().toISOString();
+  saveSyncMap(SYNC_DELETED_KEY, pending);
+}
+
+/** 設定画面：トークンと保存先を確かめてつなぐ */
+async function testSyncConnection() {
+  const token = (document.getElementById('syncTokenInput')?.value || '').trim();
+  const repo = (document.getElementById('syncRepoInput')?.value || DEFAULT_SYNC_REPO).trim();
+  if (!token) { showToast('トークンを入力してください', 'warning'); return; }
+  const btn = document.getElementById('syncTestBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '確認中...'; }
+  try {
+    const res = await fetch(`https://api.github.com/repos/${repo}`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+    });
+    if (res.status === 401) throw new Error('トークンが正しくないか、期限が切れています');
+    if (res.status === 404) throw new Error(`${repo} が見つかりません（トークンにこのリポジトリの許可がない可能性）`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const info = await res.json();
+    if (!info.private) throw new Error(`${repo} が公開リポジトリです。非公開にしてから使ってください`);
+    if (info.permissions && !info.permissions.push) throw new Error('書き込みの許可がありません（Contents: Read and write が必要）');
+    localStorage.setItem(SYNC_TOKEN_KEY, token);
+    localStorage.setItem(SYNC_REPO_KEY, repo);
+    // つなぎ直したときは「前回」の記憶を捨て、クラウドと全件を突き合わせ直す
+    [SYNC_SHAS_KEY, SYNC_SENT_KEY, SYNC_LAST_KEY].forEach(k => localStorage.removeItem(k));
+    OLD_GIST_KEYS.forEach(k => localStorage.removeItem(k));
+    showToast(`${repo} につなぎました ✓ 同期を始めます`, 'success');
+    renderDriveSettings();
+    await syncNow(true);
+  } catch (e) {
+    showToast(`接続に失敗しました: ${e.message}`, 'error', 6000);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '接続して同期'; }
+  }
+}
+
+/** 設定画面のクラウド同期セクションを描画 */
 function renderDriveSettings() {
   const el = document.getElementById('driveSettingsArea');
   if (!el) return;
-  const token = getGistToken();
-  const gistId = getGistId();
-  const lastSync = localStorage.getItem(GIST_LAST_SYNC_KEY);
+  const token = getSyncToken();
+  const lastSync = localStorage.getItem(SYNC_LAST_KEY);
+  const pendingN = Object.keys(loadSyncMap(SYNC_DELETED_KEY)).length;
 
   if (token) {
     el.innerHTML = `
@@ -237,62 +257,56 @@ function renderDriveSettings() {
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
           <span style="font-size:1.4rem">✅</span>
           <div>
-            <div style="font-weight:600">GitHub Gist 接続済み</div>
-            <div style="font-size:0.8rem;color:var(--text-muted)">
-              ${gistId ? `Gist ID: ${gistId.substring(0, 8)}...` : '初回同期でGistを作成します'}
-            </div>
+            <div style="font-weight:600">クラウド同期 接続済み</div>
+            <div style="font-size:0.8rem;color:var(--text-muted)">保存先：GitHub 非公開リポジトリ ${escHtml(getSyncRepo())}</div>
           </div>
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button class="btn btn-primary btn-sm" onclick="syncToGist(true)">
-            ☁️ 今すぐ同期
-          </button>
-          <button class="btn btn-ghost btn-sm" onclick="clearGistConnection()">
-            接続を解除
-          </button>
+          <button class="btn btn-primary btn-sm" onclick="syncNow(true)">☁️ 今すぐ同期</button>
+          <button class="btn btn-ghost btn-sm" onclick="clearSyncConnection()">接続を解除</button>
         </div>
         <div style="font-size:0.8rem;color:var(--text-muted);margin-top:8px">
-          ${lastSync ? `最終同期：${formatDate(lastSync)}` : '未同期'}<br>
-          保存先：GitHub プライベートGist / ${GIST_FILENAME}
+          ${lastSync ? `最終同期：${formatDate(lastSync)}` : '未同期'}${pendingN ? `　／　未送信の削除 ${pendingN}件` : ''}<br>
+          記録は1件ずつ保存し、変わった記録だけを送ります
         </div>
       </div>`;
   } else {
+    const hadGist = OLD_GIST_KEYS.some(k => localStorage.getItem(k));
     el.innerHTML = `
       <div class="drive-settings-inner">
+        ${hadGist ? `<div style="background:#fef3c7;border-left:3px solid #f59e0b;padding:8px 10px;margin-bottom:10px;font-size:0.85rem;line-height:1.7">
+          同期の仕組みが新しくなりました（Gist → 非公開リポジトリ）。<br>下の手順で新しいトークンを作って、つなぎ直してください。記録はこの端末に残っています。</div>` : ''}
         <div class="form-group">
-          <label class="form-label">GitHub Personal Access Token</label>
-          <input type="password" class="form-control" id="gistTokenInput"
-            placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
-            autocomplete="off">
-          <div style="font-size:0.75rem;color:var(--text-muted);margin-top:4px">
-            GitHub → Settings → Developer settings → Personal access tokens → gist スコープのみでOK
-          </div>
+          <label class="form-label">GitHub トークン（Fine-grained）</label>
+          <input type="password" class="form-control" id="syncTokenInput" placeholder="github_pat_xxxxxxxx" autocomplete="off">
+        </div>
+        <div class="form-group" style="margin-top:8px">
+          <label class="form-label">保存先リポジトリ</label>
+          <input type="text" class="form-control" id="syncRepoInput" value="${escHtml(getSyncRepo())}" autocomplete="off">
         </div>
         <div style="margin-top:10px">
-          <button class="btn btn-primary" id="gistTestBtn" onclick="testGistConnection()">
-            接続テスト
-          </button>
+          <button class="btn btn-primary" id="syncTestBtn" onclick="testSyncConnection()">接続して同期</button>
         </div>
         <div style="font-size:0.8rem;color:var(--text-muted);margin-top:12px;line-height:1.8">
-          ⓘ 初回設定手順：<br>
-          1. GitHub の <strong>Settings → Developer settings</strong> を開く<br>
-          2. <strong>Personal access tokens → Tokens (classic)</strong><br>
-          3. <strong>gist</strong> スコープにチェック → トークン生成<br>
-          4. 上に貼り付けて「接続テスト」をクリック
+          ⓘ トークンの作り方：<br>
+          1. GitHub の <strong>Settings → Developer settings → Personal access tokens → Fine-grained tokens</strong><br>
+          2. <strong>Generate new token</strong>。Expiration は <strong>1年</strong> など<br>
+          3. Repository access：<strong>Only select repositories</strong> → <strong>pig-vet-data</strong> だけを選ぶ<br>
+          4. Permissions：<strong>Contents</strong> を <strong>Read and write</strong><br>
+          5. できたトークンを上に貼り付けて「接続して同期」<br>
+          ※ トークンは1Passwordに保存。PCと携帯で同じトークンを使えます
         </div>
       </div>`;
   }
 }
 
-/** Gist接続を解除 */
-function clearGistConnection() {
+/** クラウド同期の接続を解除（記録はこの端末に残る） */
+function clearSyncConnection() {
   showConfirm(
-    'Gist接続を解除しますか？',
-    'トークンとGist IDの設定を削除します。ローカルデータは残ります。',
+    'クラウド同期を解除しますか？',
+    'この端末からトークンの設定を消します。記録はこの端末にもクラウドにも残ります。',
     () => {
-      localStorage.removeItem(GIST_TOKEN_KEY);
-      localStorage.removeItem(GIST_ID_KEY);
-      localStorage.removeItem(GIST_LAST_SYNC_KEY);
+      [SYNC_TOKEN_KEY, SYNC_SHAS_KEY, SYNC_SENT_KEY, SYNC_LAST_KEY, SYNC_DELETED_KEY].forEach(k => localStorage.removeItem(k));
       updateSyncStatus('unset');
       renderDriveSettings();
       showToast('接続を解除しました', 'success');
@@ -1339,8 +1353,8 @@ async function handleFormSave() {
     renderDetail(record);
     navigateTo('detail');
 
-    // Gistに自動同期（バックグラウンド）
-    syncToGist(false);
+    // クラウドに自動同期（バックグラウンド）
+    syncNow(false);
   } catch (e) {
     console.error('保存エラー:', e);
     showToast('保存に失敗しました', 'error');
@@ -1366,14 +1380,15 @@ function confirmDelete(id) {
     async () => {
       try {
         await deleteRecord(id);
+        markDeletedForSync(id);
         state.records = await getAllRecords();
         updateFarmFilter();
         renderList();
         showToast('削除しました', 'success');
         navigateTo('list');
 
-        // Gistに自動同期（バックグラウンド）
-        syncToGist(false);
+        // クラウドに自動同期（バックグラウンド）
+        syncNow(false);
       } catch (e) {
         console.error('削除エラー:', e);
         showToast('削除に失敗しました', 'error');
@@ -1465,7 +1480,7 @@ function shrinkAllPhotos() {
       renderDataPage();
       const after = JSON.stringify(state.records).length;
       showToast(`${recs}件・写真${photos}枚を軽くしました（${mb(before)}MB → ${mb(after)}MB）`, 'success', 8000);
-      if (getGistToken() && recs > 0) syncToGist(true);
+      if (getSyncToken() && recs > 0) syncNow(true);
   };
   showConfirm(
     '写真を軽くしますか？',
@@ -1948,6 +1963,7 @@ async function handleImport(input) {
             renderList();
             renderDataPage();
             showToast(`${data.records.length}件インポートしました ✓`, 'success');
+            syncNow(false);  // 取り込んだ記録をクラウドにも送る
           } catch (err) {
             console.error('インポートエラー:', err);
             showToast('インポートに失敗しました', 'error');
@@ -1969,6 +1985,8 @@ function handleDeleteAll() {
     async () => {
       try {
         await clearAllRecords();
+        // この端末だけ空にする。同期の記憶も捨てるので、つないでいれば次の同期でクラウドの記録が戻る
+        [SYNC_SHAS_KEY, SYNC_SENT_KEY, SYNC_DELETED_KEY].forEach(k => localStorage.removeItem(k));
         state.records = [];
         updateFarmFilter();
         renderList();
@@ -2034,9 +2052,9 @@ async function init() {
     navigateTo('list');
 
     // ヘッダーの同期ステータス初期化
-    if (getGistToken()) {
+    if (getSyncToken()) {
       updateSyncStatus('offline');
-      syncFromGist();
+      syncNow(false);
     } else {
       updateSyncStatus('unset');
     }
