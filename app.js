@@ -11,6 +11,12 @@
 // 定数・設定
 // ===================================================
 
+// アプリの版。直したら index.html の ?v= と version.json も同じ値にそろえる
+// （ホーム画面アプリのiPhoneは古いファイルを持ち続けるので、版を見比べて更新を促す）
+const APP_VERSION = '2026.11.17';
+const IS_STANDALONE = window.navigator.standalone === true ||
+  (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+
 const DB_NAME = 'PigVetRecordDB';
 const DB_VERSION = 1;
 const STORE_RECORDS = 'records';
@@ -269,6 +275,7 @@ function renderDriveSettings() {
           ${lastSync ? `最終同期：${formatDate(lastSync)}` : '未同期'}${pendingN ? `　／　未送信の削除 ${pendingN}件` : ''}<br>
           記録は1件ずつ保存し、変わった記録だけを送ります
         </div>
+        ${versionInfoHtml()}
       </div>`;
   } else {
     const hadGist = OLD_GIST_KEYS.some(k => localStorage.getItem(k));
@@ -296,8 +303,39 @@ function renderDriveSettings() {
           5. できたトークンを上に貼り付けて「接続して同期」<br>
           ※ トークンは1Passwordに保存。PCと携帯で同じトークンを使えます
         </div>
+        ${versionInfoHtml()}
       </div>`;
   }
+}
+
+/** 設定画面の下に出す「アプリの版」。PCとスマホで同じ版か見比べる用 */
+function versionInfoHtml() {
+  return `<div style="font-size:0.75rem;color:var(--text-muted);margin-top:12px;padding-top:8px;border-top:1px dashed #cbd5e1">
+    アプリの版：<strong>${APP_VERSION}</strong>${IS_STANDALONE ? '（ホーム画面から起動）' : '（ブラウザで起動）'}
+  </div>`;
+}
+
+// ---------- 新しい版のお知らせ ----------
+// ホーム画面アプリは閉じずに裏で生き続けるので、起動時と画面に戻ってきた時に version.json を見比べる
+async function checkForUpdate() {
+  try {
+    const res = await fetch(`version.json?t=${Date.now()}`, { cache: 'no-store' });
+    if (!res.ok) return;
+    const latest = String((await res.json()).version || '');
+    if (!latest || latest === APP_VERSION || document.getElementById('updateBanner')) return;
+    const bar = document.createElement('div');
+    bar.id = 'updateBanner';
+    bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:10000;background:#1e3a8a;color:#fff;' +
+      'padding:12px 14px calc(12px + env(safe-area-inset-bottom));display:flex;gap:10px;align-items:center;justify-content:space-between;font-size:0.9rem';
+    bar.innerHTML = `<span>新しい版（${escHtml(latest)}）があります</span>
+      <button style="background:#fff;color:#1e3a8a;border:none;border-radius:6px;padding:8px 14px;font-weight:700">更新する</button>`;
+    bar.querySelector('button').onclick = () => {
+      const u = new URL(location.href);
+      u.searchParams.set('v', latest);
+      location.replace(u.toString());
+    };
+    document.body.appendChild(bar);
+  } catch (e) { /* 電波が無いときは何もしない */ }
 }
 
 /** クラウド同期の接続を解除（記録はこの端末に残る） */
@@ -1823,6 +1861,20 @@ function printRecord(id) {
     return;
   }
 
+  // 写真の多い記録は組み立てに時間がかかるので、先に「準備中」を出してから組み立てる。
+  // 途中で失敗したら、何が起きたかを画面に出す（スマホでは開発者ツールが見られないため）
+  showToast('印刷用の画面を準備しています…', 'default', 2000);
+  setTimeout(() => {
+    try {
+      _openPrintOverlay(recordsToPrint);
+    } catch (e) {
+      console.error('印刷画面の作成に失敗:', e);
+      showToast(`印刷画面を開けませんでした（${e && e.message ? e.message : e}）`, 'error', 10000);
+    }
+  }, 50);
+}
+
+function _openPrintOverlay(recordsToPrint) {
   // 別ウィンドウではなく、アプリ内オーバーレイで表示（閉じれば元の画面に即戻る）
   const dateStr = new Date().toLocaleDateString('ja-JP');
   const inner = _buildPrintInner(recordsToPrint);
@@ -1836,7 +1888,7 @@ function printRecord(id) {
     <div class="print-toolbar no-print">
       <button class="print-close-btn" onclick="closePrintOverlay()">← 閉じる</button>
       <span class="print-hint">🖨️ 印刷ダイアログで <strong>「PDFに保存」</strong> を選ぶとPDFになります</span>
-      <button class="print-do-btn" onclick="window.print()">🖨️ 印刷 / PDF保存</button>
+      <button class="print-do-btn" onclick="doPrint()">🖨️ 印刷 / PDF保存</button>
     </div>
     <div class="print-paper">
       <p style="color:#888;font-size:0.85em;margin-bottom:12px">出力日：${dateStr}　|　${recordsToPrint.length}件</p>
@@ -1848,6 +1900,21 @@ function printRecord(id) {
   // 「PDFに保存」のファイル名はページのタイトルになるので、印刷画面を開いている間だけ差し替える
   if (!_titleBeforePrint) _titleBeforePrint = document.title;
   document.title = _printFileName(recordsToPrint);
+}
+
+/** 印刷ダイアログを開く。開かなかったら（ホーム画面アプリのiPhoneなど）理由を知らせる */
+function doPrint() {
+  let opened = false;
+  const mark = () => { opened = true; };
+  window.addEventListener('beforeprint', mark, { once: true });
+  try { window.print(); } catch (e) { /* 下で知らせる */ }
+  setTimeout(() => {
+    window.removeEventListener('beforeprint', mark);
+    if (opened) return;
+    showToast(IS_STANDALONE
+      ? '印刷ダイアログが開きませんでした。ホーム画面から開いたカルテでは、iPhoneの仕組みで印刷できないことがあります'
+      : '印刷ダイアログが開きませんでした', 'warning', 10000);
+  }, 1500);
 }
 
 let _titleBeforePrint = '';
@@ -2058,6 +2125,11 @@ async function init() {
     } else {
       updateSyncStatus('unset');
     }
+
+    checkForUpdate();
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') checkForUpdate();
+    });
   } catch (e) {
     console.error('初期化エラー:', e);
     document.body.innerHTML = `
